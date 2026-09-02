@@ -1,5 +1,6 @@
 import os
 import random
+import re
 
 import discord
 from discord import app_commands
@@ -9,11 +10,22 @@ from dotenv import load_dotenv
 from config import (
     DEFAULT_CAP_RATE,
     USER_CAP_RATES,
+
     CAP_RESPONSES,
     NO_CAP_RESPONSES,
+
     RARE_CAP_RESPONSES,
     RARE_NO_CAP_RESPONSES,
     RARE_RESPONSE_RATE,
+
+    SAME_INVOKER_REPEAT_RESPONSES,
+    REPEAT_CASE_RESPONSES,
+    SECOND_APPEAL_RESPONSES,
+
+    BOT_ON_BOT_RESPONSES,
+
+    BEEF_CATEGORIES,
+
     APPEAL_SUCCESS_RATE,
 )
 
@@ -53,6 +65,7 @@ intents.message_content = True
 class CapBot(commands.Bot):
 
     def __init__(self):
+
         super().__init__(
             command_prefix="!",
             intents=intents,
@@ -61,10 +74,16 @@ class CapBot(commands.Bot):
     async def setup_hook(self):
 
         setup_database()
-        print("Database ready.")
+
+        print(
+            "Database ready."
+        )
 
         await self.tree.sync()
-        print("Slash commands synced.")
+
+        print(
+            "Slash commands synced."
+        )
 
 
 bot = CapBot()
@@ -84,38 +103,49 @@ def get_cap_probability(user_id):
 
 def determine_verdict(user_id):
 
-    cap_probability = get_cap_probability(
+    probability = get_cap_probability(
         user_id
     )
 
-    if random.random() < cap_probability:
+    if random.random() < probability:
         return "CAP"
 
     return "NO_CAP"
 
 
-def choose_response(verdict, mention):
+def choose_response(
+    verdict,
+    mention
+):
 
     rare = (
         random.random()
         < RARE_RESPONSE_RATE
     )
 
+
     if verdict == "CAP":
 
         if rare:
             pool = RARE_CAP_RESPONSES
+
         else:
             pool = CAP_RESPONSES
+
 
     else:
 
         if rare:
             pool = RARE_NO_CAP_RESPONSES
+
         else:
             pool = NO_CAP_RESPONSES
 
-    response = random.choice(pool)
+
+    response = random.choice(
+        pool
+    )
+
 
     return response.format(
         mention=mention
@@ -123,7 +153,174 @@ def choose_response(verdict, mention):
 
 
 # ============================================================
-# FIND WHICH MESSAGE WE ARE JUDGING
+# CLEAN MESSAGE TEXT
+# ============================================================
+
+def clean_message_content(message):
+
+    content = message.content.lower()
+
+
+    # Remove CapBot's Discord mention.
+    #
+    # Discord represents mentions internally as:
+    #
+    # <@123456789>
+    #
+    # or sometimes:
+    #
+    # <@!123456789>
+
+    if bot.user:
+
+        content = content.replace(
+            f"<@{bot.user.id}>",
+            ""
+        )
+
+        content = content.replace(
+            f"<@!{bot.user.id}>",
+            ""
+        )
+
+
+    # Replace punctuation with spaces
+
+    cleaned = re.sub(
+        r"[^\w\s']",
+        " ",
+        content
+    )
+
+
+    # Collapse repeated whitespace
+
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned
+    ).strip()
+
+
+    return cleaned
+
+
+# ============================================================
+# KEYWORD MATCHING
+# ============================================================
+
+def keyword_matches(
+    cleaned_content,
+    keyword
+):
+
+    keyword_clean = (
+        keyword
+        .lower()
+        .strip()
+    )
+
+
+    # Multi-word phrase
+
+    if " " in keyword_clean:
+
+        return (
+            keyword_clean
+            in cleaned_content
+        )
+
+
+    # Single words need boundaries.
+    #
+    # This prevents:
+    #
+    # "cap"
+    #
+    # matching random words containing
+    # those same characters.
+
+    pattern = (
+        r"\b"
+        + re.escape(keyword_clean)
+        + r"\b"
+    )
+
+
+    return bool(
+        re.search(
+            pattern,
+            cleaned_content
+        )
+    )
+
+
+# ============================================================
+# BEEF CLASSIFIER
+# ============================================================
+
+def get_beef_category(message):
+
+    cleaned = clean_message_content(
+        message
+    )
+
+
+    if not cleaned:
+        return None
+
+
+    # --------------------------------------------------------
+    # Iterate in config order.
+    #
+    # More specific categories should therefore appear
+    # before generic categories inside config.py.
+    # --------------------------------------------------------
+
+    for category, data in BEEF_CATEGORIES.items():
+
+        keywords = data[
+            "keywords"
+        ]
+
+
+        for keyword in keywords:
+
+            if keyword_matches(
+                cleaned,
+                keyword
+            ):
+
+                return category
+
+
+    return None
+
+
+def choose_beef_response(
+    category,
+    mention
+):
+
+    responses = (
+        BEEF_CATEGORIES[
+            category
+        ]["responses"]
+    )
+
+
+    response = random.choice(
+        responses
+    )
+
+
+    return response.format(
+        mention=mention
+    )
+
+
+# ============================================================
+# FIND TARGET MESSAGE
 # ============================================================
 
 async def find_target_message(message):
@@ -131,8 +328,8 @@ async def find_target_message(message):
     # --------------------------------------------------------
     # REPLY MODE
     #
-    # Reply to a human message + mention CapBot
-    # → judge that message
+    # Reply to a human message + @CapBot
+    # → judge that exact message
     # --------------------------------------------------------
 
     if (
@@ -142,28 +339,32 @@ async def find_target_message(message):
 
         try:
 
-            target = await message.channel.fetch_message(
-                message.reference.message_id
+            target = (
+                await message.channel.fetch_message(
+                    message.reference.message_id
+                )
             )
 
             return target
+
 
         except (
             discord.NotFound,
             discord.Forbidden,
             discord.HTTPException,
         ):
+
             pass
 
 
     # --------------------------------------------------------
     # NORMAL MODE
     #
-    # Otherwise judge the previous human message
+    # Otherwise find the previous human message.
     # --------------------------------------------------------
 
     async for previous_message in message.channel.history(
-        limit=5,
+        limit=10,
         before=message,
     ):
 
@@ -177,59 +378,79 @@ async def find_target_message(message):
 
 
 # ============================================================
-# FIND ORIGINAL MESSAGE FROM A CAPBOT VERDICT
+# FIND ORIGINAL STATEMENT FROM CAPBOT VERDICT
 # ============================================================
 
-async def get_original_message_from_capbot_reply(message):
+async def get_original_message_from_capbot_reply(
+    message
+):
 
-    # User must be replying to something
+    # The user must be replying to something.
+
     if not (
         message.reference
         and message.reference.message_id
     ):
+
         return None
+
 
     try:
 
-        replied_message = await message.channel.fetch_message(
-            message.reference.message_id
+        replied_message = (
+            await message.channel.fetch_message(
+                message.reference.message_id
+            )
         )
+
 
     except (
         discord.NotFound,
         discord.Forbidden,
         discord.HTTPException,
     ):
+
         return None
 
 
-    # The replied-to message must be CapBot's message
-    if replied_message.author.id != bot.user.id:
+    # Must be replying to CapBot.
+
+    if (
+        replied_message.author.id
+        != bot.user.id
+    ):
+
         return None
 
 
-    # CapBot's verdict itself must be a reply
-    # to the original human statement
+    # CapBot's verdict itself must be
+    # a reply to the original statement.
+
     if not (
         replied_message.reference
         and replied_message.reference.message_id
     ):
+
         return None
 
 
     try:
 
-        original_message = await message.channel.fetch_message(
-            replied_message.reference.message_id
+        original_message = (
+            await message.channel.fetch_message(
+                replied_message.reference.message_id
+            )
         )
 
         return original_message
+
 
     except (
         discord.NotFound,
         discord.Forbidden,
         discord.HTTPException,
     ):
+
         return None
 
 
@@ -237,55 +458,77 @@ async def get_original_message_from_capbot_reply(message):
 # STREAK ANNOUNCEMENTS
 # ============================================================
 
-def get_streak_message(stats, mention):
+def get_streak_message(
+    stats,
+    mention
+):
 
-    streak = stats["current_streak"]
-    verdict = stats["current_verdict"]
+    streak = stats[
+        "current_streak"
+    ]
+
+    verdict = stats[
+        "current_verdict"
+    ]
 
 
     # --------------------------------------------------------
-    # CAP streaks
+    # CAP STREAKS
     # --------------------------------------------------------
 
     if verdict == "CAP":
 
         if streak == 3:
+
             return (
-                f"{mention} hat trick 🧢🧢🧢"
+                f"{mention} "
+                "hat trick 🧢🧢🧢"
             )
+
 
         if streak == 5:
+
             return (
-                f"{mention} GENERATIONAL LIAR"
+                f"{mention} "
+                "GENERATIONAL LIAR"
             )
 
+
         if streak == 10:
+
             return (
-                f"{mention} statistically this is "
-                "getting concerning"
+                f"{mention} statistically "
+                "this is getting concerning"
             )
 
 
     # --------------------------------------------------------
-    # NO-CAP streaks
+    # NO-CAP STREAKS
     # --------------------------------------------------------
 
     if verdict == "NO_CAP":
 
         if streak == 3:
+
             return (
-                f"{mention} is on a truth arc 💯"
+                f"{mention} "
+                "is on a truth arc 💯"
             )
+
 
         if streak == 5:
+
             return (
-                f"{mention} certified truth merchant"
+                f"{mention} "
+                "certified truth merchant"
             )
 
+
         if streak == 10:
+
             return (
-                f"{mention} has apparently transcended "
-                "dishonesty"
+                f"{mention} has apparently "
+                "transcended dishonesty"
             )
 
 
@@ -309,7 +552,7 @@ async def on_ready():
 
 
 # ============================================================
-# MAIN @CAPBOT SYSTEM
+# MAIN MESSAGE HANDLER
 # ============================================================
 
 @bot.event
@@ -324,21 +567,61 @@ async def on_message(message):
 
 
     # --------------------------------------------------------
-    # Only activate when CapBot is mentioned
+    # CapBot must actually be mentioned
     # --------------------------------------------------------
 
-    if bot.user not in message.mentions:
+    if (
+        bot.user
+        not in message.mentions
+    ):
+
         return
 
 
-    # --------------------------------------------------------
-    # Detect appeal request
-    # --------------------------------------------------------
+    # ========================================================
+    # BEEF DETECTION
+    # ========================================================
 
-    content = message.content.lower()
+    beef_category = (
+        get_beef_category(
+            message
+        )
+    )
+
+
+    if beef_category:
+
+        response = (
+            choose_beef_response(
+                beef_category,
+                message.author.mention
+            )
+        )
+
+
+        await message.reply(
+            response
+        )
+
+        return
+
+
+    # ========================================================
+    # APPEAL DETECTION
+    # ========================================================
+
+    cleaned_content = (
+        clean_message_content(
+            message
+        )
+    )
+
 
     is_appeal = (
-        "appeal" in content
+        keyword_matches(
+            cleaned_content,
+            "appeal"
+        )
     )
 
 
@@ -394,28 +677,35 @@ async def on_message(message):
         # 9 created_at
         # ----------------------------------------------------
 
-        target_user_id = ruling[4]
         original_verdict = ruling[7]
+
         already_appealed = ruling[8]
 
 
-
         # ----------------------------------------------------
-        # Only one appeal allowed
+        # SECOND APPEAL
         # ----------------------------------------------------
 
         if already_appealed:
 
+            response = random.choice(
+                SECOND_APPEAL_RESPONSES
+            )
+
+
             await message.reply(
-                "Appeal already used. "
-                "The court is closed."
+                response.format(
+                    mention=message.author.mention
+                )
             )
 
             return
 
 
         # ----------------------------------------------------
-        # Consume the appeal
+        # Anyone can appeal.
+        #
+        # Every ruling still receives only ONE appeal.
         # ----------------------------------------------------
 
         mark_appealed(
@@ -423,15 +713,15 @@ async def on_message(message):
         )
 
 
-        # ----------------------------------------------------
-        # Determine whether appeal succeeds
-        # ----------------------------------------------------
-
         appeal_success = (
             random.random()
             < APPEAL_SUCCESS_RATE
         )
 
+
+        # ----------------------------------------------------
+        # SUCCESSFUL APPEAL
+        # ----------------------------------------------------
 
         if appeal_success:
 
@@ -463,12 +753,23 @@ async def on_message(message):
             )
 
 
+        # ----------------------------------------------------
+        # FAILED APPEAL
+        # ----------------------------------------------------
+
         else:
+
+            readable_verdict = (
+                original_verdict.replace(
+                    "_",
+                    " "
+                )
+            )
+
 
             response = (
                 "## APPEAL DENIED\n\n"
-                f"**{original_verdict.replace('_', ' ')}** "
-                "stands.\n\n"
+                f"**{readable_verdict}** stands.\n\n"
                 "The court is unmoved."
             )
 
@@ -481,14 +782,9 @@ async def on_message(message):
 
 
     # ========================================================
-    # NORMAL JUDGEMENT MODE
+    # REPLYING DIRECTLY TO CAPBOT
+    # WITHOUT APPEALING
     # ========================================================
-
-    # --------------------------------------------------------
-    # If someone replies directly to a CapBot verdict
-    # with just @CapBot, don't treat CapBot itself
-    # as the target
-    # --------------------------------------------------------
 
     if (
         message.reference
@@ -497,9 +793,12 @@ async def on_message(message):
 
         try:
 
-            replied_message = await message.channel.fetch_message(
-                message.reference.message_id
+            replied_message = (
+                await message.channel.fetch_message(
+                    message.reference.message_id
+                )
             )
+
 
         except (
             discord.NotFound,
@@ -512,22 +811,47 @@ async def on_message(message):
 
         if (
             replied_message
-            and replied_message.author.id == bot.user.id
+            and replied_message.author.id
+            == bot.user.id
         ):
 
+            responses = [
+
+                "the court has already spoken.",
+
+                "if you want to challenge the ruling, appeal.",
+
+                "why are you asking me to judge myself?",
+
+                "I issued the verdict. keep up.",
+
+                "you're replying to the judge.",
+
+                "please direct complaints through the completely legitimate appeals process.",
+
+                "the judiciary does not fact-check itself.",
+
+                "this conversation is becoming procedurally confusing.",
+            ]
+
+
             await message.reply(
-                "the court has already spoken."
+                random.choice(
+                    responses
+                )
             )
 
             return
 
 
-    # --------------------------------------------------------
-    # Find which message we're judging
-    # --------------------------------------------------------
+    # ========================================================
+    # FIND TARGET MESSAGE
+    # ========================================================
 
-    target_message = await find_target_message(
-        message
+    target_message = (
+        await find_target_message(
+            message
+        )
     )
 
 
@@ -540,21 +864,23 @@ async def on_message(message):
         return
 
 
-    # --------------------------------------------------------
-    # Don't judge bot messages
-    # --------------------------------------------------------
+    # ========================================================
+    # BOT-ON-BOT VIOLENCE
+    # ========================================================
 
     if target_message.author.bot:
 
         await message.reply(
-            "the court has already spoken."
+            random.choice(
+                BOT_ON_BOT_RESPONSES
+            )
         )
 
         return
 
 
     # ========================================================
-    # CHECK FOR EXISTING RULING
+    # EXISTING RULING
     # ========================================================
 
     existing_ruling = get_ruling(
@@ -564,37 +890,45 @@ async def on_message(message):
 
     if existing_ruling:
 
-        existing_verdict = (
-            existing_ruling[7]
+        original_invoker_id = (
+            existing_ruling[6]
         )
 
 
-        if existing_verdict == "CAP":
+        # ----------------------------------------------------
+        # SAME PERSON CALLING CAPBOT AGAIN
+        # ----------------------------------------------------
 
-            repeat_responses = [
-                "verdict stands. 🧢",
-                "appeal to reality denied.",
-                "asking again isn't changing the ruling.",
-                "still cap.",
-                "the court has already spoken.",
-            ]
+        if (
+            message.author.id
+            == original_invoker_id
+        ):
 
-
-        else:
-
-            repeat_responses = [
-                "verdict stands. 💯",
-                "already cleared.",
-                "the facts remain factual.",
-                "still no cap.",
-                "the court has already spoken.",
-            ]
-
-
-        await target_message.reply(
-            random.choice(
-                repeat_responses
+            response = random.choice(
+                SAME_INVOKER_REPEAT_RESPONSES
             )
+
+
+            await message.reply(
+                response.format(
+                    mention=message.author.mention
+                )
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # DIFFERENT PERSON TRYING SAME CASE
+        # ----------------------------------------------------
+
+        response = random.choice(
+            REPEAT_CASE_RESPONSES
+        )
+
+
+        await message.reply(
+            response
         )
 
         return
@@ -621,7 +955,7 @@ async def on_message(message):
 
 
     # --------------------------------------------------------
-    # Server-only protection
+    # Server only
     # --------------------------------------------------------
 
     if message.guild is None:
@@ -634,7 +968,7 @@ async def on_message(message):
 
 
     # --------------------------------------------------------
-    # Save ruling
+    # Store ruling
     # --------------------------------------------------------
 
     save_ruling(
@@ -665,17 +999,60 @@ async def on_message(message):
 
 
     # ========================================================
-    # SELF-SUBMISSION JOKE
+    # SELF-SUBMISSION
     # ========================================================
 
     if (
-        message.author.id == target_user.id
-        and random.random() < 0.25
+        message.author.id
+        == target_user.id
+
+        and random.random()
+        < 0.25
     ):
 
+        self_submission_responses = [
+
+            (
+                f"{target_user.mention} "
+                "really called for a fact check on himself"
+            ),
+
+            (
+                f"{target_user.mention} "
+                "voluntarily submitted himself to the court"
+            ),
+
+            (
+                f"{target_user.mention} "
+                "requested an audit of his own statement"
+            ),
+
+            (
+                f"{target_user.mention} "
+                "self-reported to the authorities"
+            ),
+
+            (
+                f"{target_user.mention} "
+                "has chosen to testify against himself"
+            ),
+
+            (
+                f"{target_user.mention} "
+                "has waived the right to remain silent"
+            ),
+
+            (
+                f"{target_user.mention} "
+                "apparently wanted judicial consequences"
+            ),
+        ]
+
+
         await message.channel.send(
-            f"{target_user.mention} really called for "
-            "a fact check on himself"
+            random.choice(
+                self_submission_responses
+            )
         )
 
 
@@ -689,9 +1066,11 @@ async def on_message(message):
     )
 
 
-    streak_message = get_streak_message(
-        stats,
-        target_user.mention
+    streak_message = (
+        get_streak_message(
+            stats,
+            target_user.mention
+        )
     )
 
 
@@ -745,9 +1124,18 @@ async def stats(
         return
 
 
+    current_verdict = (
+        data["current_verdict"]
+        .replace(
+            "_",
+            " "
+        )
+    )
+
+
     current_streak = (
         f"{data['current_streak']} "
-        f"{data['current_verdict']}"
+        f"{current_verdict}"
     )
 
 
@@ -757,6 +1145,7 @@ async def stats(
         f"Judged: **{data['total']}** times\n\n"
 
         f"🧢 CAP: **{data['cap']}**\n"
+
         f"💯 NO CAP: **{data['no_cap']}**\n\n"
 
         f"Cap Rate: **{data['cap_rate']:.1f}%**\n\n"
@@ -823,17 +1212,21 @@ async def leaderboard(
         start=1
     ):
 
-        user_id = row[0]
         username = row[1]
+
         total = row[2]
+
         cap_count = row[3]
 
+
         cap_rate = (
-            cap_count / total
+            cap_count
+            / total
         ) * 100
 
 
         lines.append(
+
             f"**{position}. {username}** — "
             f"{cap_rate:.1f}% 🧢 "
             f"({cap_count}/{total})"
@@ -842,7 +1235,9 @@ async def leaderboard(
 
     text = (
         "## 🏆 CERTIFIED CAPPERS\n\n"
-        + "\n".join(lines)
+        + "\n".join(
+            lines
+        )
     )
 
 
@@ -855,4 +1250,6 @@ async def leaderboard(
 # START CAPBOT
 # ============================================================
 
-bot.run(TOKEN)
+bot.run(
+    TOKEN
+)
