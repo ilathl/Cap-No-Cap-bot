@@ -5,20 +5,12 @@
 DEFAULT_CAP_RATE = 0.50
 
 
-# ============================================================
 # SECRET USER-SPECIFIC CAP RATES
-# ============================================================
 
-# Example:
-#
-# USER_CAP_RATES = {
-#     123456789012345678: 0.90,
-# }
-#
-# Anyone not listed defaults to DEFAULT_CAP_RATE.
 
 USER_CAP_RATES = {
-    # PUT YOUR CUSTOM USER IDS HERE
+760034142964154368: 0.90
+755054539278647326: 0.10
 }
 
 
@@ -148,7 +140,7 @@ RARE_NO_CAP_RESPONSES = [
     "{mention} the court stands and applauds",
 ]
 
-RARE_RESPONSE_RATE = 0.02
+RARE_RESPONSE_RATE = 0.1
 
 
 # ============================================================
@@ -722,4 +714,4 @@ BEEF_CATEGORIES = {
 # APPEAL SYSTEM
 # ============================================================
 
-APPEAL_SUCCESS_RATE = 0.25
+APPEAL_SUCCESS_RATE = 0.50
