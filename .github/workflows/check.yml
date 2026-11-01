@@ -1,0 +1,22 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Every Python file compiles
+        run: find . -path ./.venv -prune -o -name '*.py' -print0 | xargs -0 python -m py_compile
+      - name: config.py loads
+        run: python -B -c "import config"
